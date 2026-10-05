@@ -8,6 +8,9 @@ try { config = loadConfig(); } catch (err) { console.error(err.message); process
 let websocket;
 let natsClient;
 let shuttingDown = false;
+let natsError;
+let natsConnected = false;
+let sourceStarting = false;
 const bridgeStatusSubject = `${config.subjectPrefix}.bridge.status`;
 
 async function publishDeviceUpdate(action) {
@@ -89,6 +92,7 @@ async function startBridge() {
   });
 
   const { response: loginResponse, region: resolvedRegion } = await loginWithRegionFallback(webApi);
+  if (shuttingDown) return;
   if (!loginResponse || loginResponse.error) {
     const message = loginResponse && loginResponse.msg ? loginResponse.msg : JSON.stringify(loginResponse || {});
     throw new Error(`Failed to authenticate with eWeLink cloud: ${message}`);
@@ -135,6 +139,7 @@ async function startBridge() {
     }
   );
 
+  if (shuttingDown) { websocket.close(); return; }
   console.log('Bridge is running. Waiting for device updates...');
 }
 
@@ -160,11 +165,19 @@ async function shutdown(signal, exitCode = 0) {
 
 async function monitorNats() {
   for await (const status of natsClient.status()) {
+    if (status.type === 'error') {
+      natsError = status.error || new Error('Unknown NATS server error');
+      console.error('NATS error:', natsError);
+      if (sourceStarting && !shuttingDown) shutdown('NATS_ERROR', 1);
+      continue;
+    }
     if (status.type === 'reconnect' && !shuttingDown) {
+      natsConnected = true;
       console.log('Reconnected to NATS');
       natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
-    } else if (['disconnect', 'error', 'reconnecting'].includes(status.type)) {
-      console.log(`NATS ${status.type}`);
+    } else if (['disconnect', 'reconnecting'].includes(status.type)) {
+      natsConnected = false;
+      console.log(`NATS ${status.type}${status.server ? `: ${status.server}` : ''}`);
     }
   }
 }
@@ -173,8 +186,8 @@ async function main() {
   const options = {...config.natsOptions};
   if (config.natsCreds) options.authenticator = credsAuthenticator(Buffer.from(config.natsCreds));
   natsClient = await connect(options);
+  natsConnected = true;
   if (shuttingDown) { await natsClient.close(); return; }
-  console.log('Connected to NATS');
   natsClient.closed().then(err => {
     if (!shuttingDown) {
       console.error('NATS connection closed:', err ? err.message : 'connection ended');
@@ -184,6 +197,14 @@ async function main() {
   monitorNats().catch(err => { console.error('NATS status error:', err.message); shutdown('NATS_STATUS_ERROR', 1); });
   natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
   await natsClient.flush();
+  // A PONG acknowledges the flush, but publish permission errors arrive via
+  // status() and do not reject flush(). Let that iterator process them first.
+  await new Promise(resolve => setImmediate(resolve));
+  if (natsError) throw natsError;
+  if (shuttingDown) return;
+  if (!natsConnected || natsClient.isClosed()) throw new Error('NATS disconnected before source startup');
+  console.log('Connected to NATS; status publish confirmed');
+  sourceStarting = true;
   await startBridge();
 }
 

@@ -6,9 +6,9 @@ Looking for the MQTT version of this bridge? Check out [ewelink-mqtt-bridge](htt
 
 ## How It Works
 
-1. Authenticate to eWeLink cloud using app credentials and account credentials.
-2. Open a persistent websocket to receive live device update events.
-3. Publish each update to NATS topics using a predictable topic structure.
+1. Connect to NATS and flush the bridge status publication. Server errors (including publish permission violations) block source startup.
+2. Authenticate to eWeLink cloud using app credentials and account credentials, then open a persistent websocket to receive live device update events.
+3. Publish each update to NATS subjects using a predictable subject structure.
 
 ## Subjects and payloads
 
@@ -113,11 +113,12 @@ node --check bridge.js
 ## Operational Notes
 
 - The bridge reconnects automatically to NATS.
+- NATS server errors include their full details and stop the bridge with failure. Allow publishing to both `ewelink.bridge.status` and device state subjects (or the corresponding custom prefix). The startup status check does not verify permissions for every device subject or guarantee durable delivery.
 - If websocket connectivity drops, the bridge can exit and rely on container restart policy.
 - Initial connection/login failures and exhausted NATS reconnect attempts exit with failure.
 - SIGINT/SIGTERM closes the cloud websocket and drains NATS, with a five-second shutdown limit.
 - Disabling `EXIT_ON_WEBSOCKET_CLOSE` leaves the process running after cloud closure without automatically reconnecting the cloud websocket.
-- The bridge manages `ewelink/bridge/status` itself: `online` on NATS connect, `offline` on shutdown.
+- The bridge manages `ewelink.bridge.status` itself: `online` after NATS connects, `offline` on shutdown.
 
 ## License
 
