@@ -1,11 +1,19 @@
 # eWeLink to NATS Bridge
 
-Adapted from `ewelink-mqtt-bridge`, this bridge authenticates to eWeLink cloud and republishes live websocket device updates to Core NATS. Configuration uses only environment variables; no configuration file is required.
+Adapted from [ewelink-mqtt-bridge](https://github.com/codejive/ewelink-mqtt-bridge), this bridge authenticates to eWeLink cloud and republishes live websocket device updates to Core [NATS](https://nats.io/). Configuration uses only environment variables; no configuration file is required.
+
+Looking for the MQTT version of this bridge? Check out [ewelink-mqtt-bridge](https://github.com/codejive/ewelink-mqtt-bridge).
+
+## How It Works
+
+1. Authenticate to eWeLink cloud using app credentials and account credentials.
+2. Open a persistent websocket to receive live device update events.
+3. Publish each update to NATS topics using a predictable topic structure.
 
 ## Subjects and payloads
 
-- `ewelink.<deviceId>.state.raw`: complete update params as JSON.
 - `ewelink.<deviceId>.state.<key>`: individual value (objects/arrays as JSON, scalars as text, null as empty text).
+- `ewelink.<deviceId>.state.raw`: complete update params as JSON (when `PUBLISH_RAW_STATE` is set to `true`).
 - `ewelink.bridge.status`: `online` on connection/reconnection, `offline` on graceful shutdown.
 
 For example, `{"temperature":22.5,"humidity":48}` publishes a raw JSON message and two individual messages, `22.5` and `48`. Dots, whitespace and NATS wildcards in device IDs or parameter names become underscores. Subscribe to `ewelink.>` for all messages.
