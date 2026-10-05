@@ -50,7 +50,37 @@ Core NATS delivers messages to current subscribers without retention or MQTT QoS
 
 Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. TLS certificates and credentials accept actual multiline contents, so no mounted configuration files are needed. Choose a single authentication method. Obtain eWeLink app credentials from the [developer platform](https://dev.ewelink.io/).
 
-## Run with Node.js
+## Getting App Credentials
+
+This bridge requires your own eWeLink app credentials:
+
+1. **Register an eWeLink Developer Account**
+   - Visit [eWeLink Developer Platform](https://dev.ewelink.io/)
+   - Create an account or log in
+
+2. **Create an Application**
+   - Navigate to the applications/credentials section
+   - Create a new application
+   - You'll receive an `APP_ID` and `APP_SECRET`
+
+3. **Configure the Bridge**
+   - Add `EWELINK_APP_ID` and `EWELINK_APP_SECRET` to your `.env` file or pass them as environment variables
+   - Set `EWELINK_ACCOUNT` to your eWeLink email or phone number
+
+If you're unable to obtain credentials, check the [eWeLink API Next documentation](https://www.npmjs.com/package/ewelink-api-next) or the [eWeLink community forums](https://www.ewelink.cc/).
+
+## Usage
+
+Copy `.env.example` to `.env`, fill in your credentials, and set `NATS_SERVERS` to a broker address reachable from the container (not `127.0.0.1`). Replace `<version>` below with the exact tag of a [published release](https://github.com/codejive/ewelink-nats-bridge/releases), including the `v` prefix. Normally, use the latest release:
+
+```sh
+docker run -d --name ewelink-nats-bridge --restart unless-stopped \
+  --env-file .env codejive/ewelink-nats-bridge:<version>
+```
+
+## Developing
+
+### Run with Node.js
 
 Requires Node.js 22 or newer.
 
@@ -63,7 +93,7 @@ node --env-file=.env bridge.js
 
 Alternatively export environment variables and run `npm start`. On PowerShell use `Copy-Item .env.example .env` and the same Node command. `.env` is optional and ignored by Git.
 
-## Docker
+### Docker
 
 ```sh
 docker build -t ewelink-nats-bridge:local .
@@ -71,35 +101,24 @@ docker run -d --name ewelink-nats-bridge --restart unless-stopped \
   --env-file .env ewelink-nats-bridge:local
 ```
 
-Or, after filling in `.env`, run `docker compose up -d --build`. Set `NATS_SERVERS` to a broker address reachable from the container: `127.0.0.1` inside a container refers to that container. Docker's `--env-file` does not support multiline values; supply multiline credentials/certificates through environment injection or Compose's supported quoted multiline `.env` values.
+Or, after filling in `.env`, run `docker compose up -d --build`. Set `NATS_SERVERS` to a broker address reachable from the container: `127.0.0.1` inside a container refers to that container. Docker's `--env-file` does not support multiline values; supply multiline credentials/certificates through environment injection or Compose's supported quoted multiline `.env` values.   
 
-The bridge reconnects automatically to NATS. Initial connection/login failures and exhausted NATS reconnect attempts exit with failure. SIGINT/SIGTERM closes the cloud websocket and drains NATS, with a five-second shutdown limit. Disabling `EXIT_ON_WEBSOCKET_CLOSE` leaves the process running after cloud closure without automatically reconnecting the cloud websocket.
-
-## Validation
+### Validation
 
 ```sh
 npm test
 node --check bridge.js
 ```
 
-## GitHub Actions
+## Operational Notes
 
-The workflows follow the MQTT bridge setup:
-
-- `.github/workflows/build-check.yml`: runs on pull requests, pushes to `main`, and manual dispatch. Installs dependencies with Node.js 24, checks JavaScript syntax, runs tests, and builds the Docker image for `linux/amd64` and `linux/arm64` without publishing.
-- `.github/workflows/docker-release.yml`: publishes a Docker Hub image for pushed tags matching `v*`, using the Git tag as the image tag (for example, `v1.0.0`). It builds both `linux/amd64` and `linux/arm64`; it does not publish a `latest` tag.
-
-Configure these GitHub repository secrets before releasing:
-
-| Secret | Description |
-| --- | --- |
-| `DOCKERHUB_USERNAME` | Docker Hub login username. |
-| `DOCKERHUB_TOKEN` | Docker Hub access token with push permission. |
-| `DOCKERHUB_NAMESPACE` | Docker Hub user or organization owning the image. |
-
-Published image: `<DOCKERHUB_NAMESPACE>/ewelink-nats-bridge:<git-tag>`.
+- The bridge reconnects automatically to NATS.
+- If websocket connectivity drops, the bridge can exit and rely on container restart policy.
+- Initial connection/login failures and exhausted NATS reconnect attempts exit with failure.
+- SIGINT/SIGTERM closes the cloud websocket and drains NATS, with a five-second shutdown limit.
+- Disabling `EXIT_ON_WEBSOCKET_CLOSE` leaves the process running after cloud closure without automatically reconnecting the cloud websocket.
+- The bridge manages `ewelink/bridge/status` itself: `online` on NATS connect, `offline` on shutdown.
 
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE). Based on the sibling eWeLink MQTT bridge.
-
