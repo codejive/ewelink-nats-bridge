@@ -33,3 +33,13 @@ test('raw publishing can be disabled and aliases work', () => {
   assert.deepEqual(config.natsOptions.servers, ['nats://alias:4222']);
   assert.deepEqual(deviceMessages({deviceid:'123', params:{switch:'on'}}, config), [['ewelink.123.state.switch', 'on']]);
 });
+test('raw-only publishing suppresses all individual state subjects', () => {
+  const params = {temperature:22.5, switches:[{switch:'on'}], empty:null, 'a.* >':'on'};
+  for (const value of ['only', 'ONLY']) {
+    const config = loadConfig({...credentials, SUBJECT_PREFIX:'home.ewelink', PUBLISH_RAW_STATE:value});
+    assert.deepEqual(deviceMessages({deviceid:'a.b', params}, config), [
+      ['home.ewelink.a_b.state.raw', JSON.stringify(params)]
+    ]);
+  }
+  assert.throws(() => loadConfig({...credentials, PUBLISH_RAW_STATE:'maybe'}), /PUBLISH_RAW_STATE/);
+});

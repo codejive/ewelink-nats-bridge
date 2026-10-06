@@ -13,7 +13,7 @@ Looking for the MQTT version of this bridge? Check out [ewelink-mqtt-bridge](htt
 ## Subjects and payloads
 
 - `ewelink.<deviceId>.state.<key>`: individual value (objects/arrays as JSON, scalars as text, null as empty text).
-- `ewelink.<deviceId>.state.raw`: complete update params as JSON (when `PUBLISH_RAW_STATE` is set to `true`).
+- `ewelink.<deviceId>.state.raw`: complete update params as JSON (when `PUBLISH_RAW_STATE` is set to `true` or `only`).
 - `ewelink.bridge.status`: `online` on connection/reconnection, `offline` on graceful shutdown.
 
 For example, `{"temperature":22.5,"humidity":48}` publishes a raw JSON message and two individual messages, `22.5` and `48`. Dots, whitespace and NATS wildcards in device IDs or parameter names become underscores. Subscribe to `ewelink.>` for all messages.
@@ -44,7 +44,7 @@ Core NATS delivers messages to current subscribers without retention or MQTT QoS
 | `NATS_RECONNECT_TIME_WAIT` | `3000` | Reconnect delay in milliseconds, nonnegative integer (client adds jitter). |
 | `NATS_MAX_RECONNECT_ATTEMPTS` | `-1` | Reconnect attempts per server; `-1` unlimited, `0` disables retries. |
 | `SUBJECT_PREFIX` | `ewelink` | Nonempty dot-separated subject prefix without wildcards/whitespace. |
-| `PUBLISH_RAW_STATE` | `true` | Publish full update params on the raw subject. |
+| `PUBLISH_RAW_STATE` | `true` | `true`: publish raw JSON and individual state keys; `false`: individual keys only; `only`: raw JSON only. |
 | `VERBOSE` | `false` | Log all eWeLink websocket packets. |
 | `EXIT_ON_WEBSOCKET_CLOSE` | `true` | Exit with failure on cloud websocket closure, for container restart. |
 

@@ -20,7 +20,7 @@ function loadConfig(env = process.env) {
     ewelinkAppId: get('EWELINK_APP_ID'),
     ewelinkAppSecret: get('EWELINK_APP_SECRET'),
     subjectPrefix: get('SUBJECT_PREFIX', 'ewelink'),
-    publishRawState: bool('PUBLISH_RAW_STATE', true),
+    publishRawState: String(get('PUBLISH_RAW_STATE', true)).toLowerCase() === 'only' ? 'only' : bool('PUBLISH_RAW_STATE', true),
     verbose: bool('VERBOSE', false),
     exitOnWsClose: bool('EXIT_ON_WEBSOCKET_CLOSE', true),
     natsOptions: {
@@ -60,6 +60,7 @@ function sanitizeSubjectToken(value) {
 function deviceMessages(action, config) {
   const base = `${config.subjectPrefix}.${sanitizeSubjectToken(action.deviceid)}.state`;
   const messages = config.publishRawState ? [[`${base}.raw`, JSON.stringify(action.params)]] : [];
+  if (config.publishRawState === 'only') return messages;
   for (const [key, value] of Object.entries(action.params)) {
     messages.push([`${base}.${sanitizeSubjectToken(key)}`, value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)]);
   }
