@@ -17,6 +17,13 @@ let sourceTask;
 let sourceClosed;
 let resolveSourceClosed;
 const ownsSource = () => !config.failover.enabled || Boolean(lease?.owned);
+async function withErrorContext(context, operation) {
+  try {
+    return await operation();
+  } catch (err) {
+    throw new Error(`${context}: ${err?.message || err}`, { cause: err });
+  }
+}
 function debug(message) {
   if (config.verbose) console.log(`${lease ? `[${lease.id}] ` : ''}${message}`);
 }
@@ -100,7 +107,9 @@ async function startBridge() {
     region: config.ewelinkRegion
   });
 
-  const { response: loginResponse, region: resolvedRegion } = await loginWithRegionFallback(webApi);
+  const { response: loginResponse, region: resolvedRegion } = await withErrorContext(
+    'Failed to authenticate with eWeLink cloud', () => loginWithRegionFallback(webApi)
+  );
   if (shuttingDown || !ownsSource()) { debug('Discarding delayed login result: shutting down or ownership invalid'); return; }
   if (!loginResponse || loginResponse.error) {
     const message = loginResponse && loginResponse.msg ? loginResponse.msg : JSON.stringify(loginResponse || {});
@@ -115,7 +124,7 @@ async function startBridge() {
 
   sourceClosed = new Promise(resolve => { resolveSourceClosed = resolve; });
   console.log('eWeLink authentication succeeded; creating websocket connection');
-  websocket = await wsClient.Connect.create(
+  websocket = await withErrorContext('Failed to connect to eWeLink websocket', () => wsClient.Connect.create(
     {
       region: resolvedRegion,
       at: webApi.at,
@@ -149,7 +158,7 @@ async function startBridge() {
 
       await publishDeviceUpdate(action);
     }
-  );
+  ));
 
   if (shuttingDown || !ownsSource()) {
     debug('Closing delayed websocket result: shutting down or ownership invalid');
@@ -224,8 +233,10 @@ async function monitorNats() {
 
 async function main() {
   const options = {...config.natsOptions};
-  if (config.natsCreds) options.authenticator = credsAuthenticator(Buffer.from(config.natsCreds));
-  natsClient = await connect(options);
+  natsClient = await withErrorContext('Failed to connect to NATS', () => {
+    if (config.natsCreds) options.authenticator = credsAuthenticator(Buffer.from(config.natsCreds));
+    return connect(options);
+  });
   natsConnected = true;
   if (shuttingDown) { await natsClient.close(); return; }
   natsClient.closed().then(err => {
@@ -238,7 +249,7 @@ async function main() {
   monitorNats().catch(err => { console.error('NATS status error:', err.message); shutdown('NATS_STATUS_ERROR', 1); });
   if (config.failover.enabled) {
     debug(`Opening failover bucket ${config.failover.bucket}`);
-    const kv = await openLeaseBucket(natsClient, config.failover);
+    const kv = await withErrorContext('Failed to open NATS failover bucket', () => openLeaseBucket(natsClient, config.failover));
     debug(`Failover bucket validated: TTL ${config.failover.duration}ms, history 1`);
     if (shuttingDown) return;
     lease = new Lease(kv, config.failover, err => {
@@ -246,7 +257,7 @@ async function main() {
       shutdown('LEASE_LOST', 1);
     }, undefined, (message, verboseOnly) => { if (!verboseOnly || config.verbose) console.log(message); });
     console.log(`[${lease.id}] standby; waiting for ${config.failover.bucket}/${config.failover.key}`);
-    while (!shuttingDown && !await lease.acquire()) {
+    while (!shuttingDown && !await withErrorContext('Failed to acquire NATS failover lease', () => lease.acquire())) {
       const delay = config.failover.retry * (0.8 + Math.random() * 0.4);
       debug(`Standby acquisition retry in ${Math.round(delay)}ms`);
       await new Promise(resolve => setTimeout(resolve, delay));
@@ -256,7 +267,7 @@ async function main() {
   }
   // Let queued connection events be handled before starting the source.
   await new Promise(resolve => setImmediate(resolve));
-  if (natsError) throw natsError;
+  if (natsError) throw new Error(`NATS failed before source startup: ${natsError.message || natsError}`, { cause: natsError });
   if (shuttingDown) return;
   if (!natsConnected || natsClient.isClosed()) throw new Error('NATS disconnected before source startup');
   console.log('Connected to NATS');
