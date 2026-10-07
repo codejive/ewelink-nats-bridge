@@ -3,6 +3,13 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {loadConfig, deviceMessages} = require('../config');
 const credentials = {EWELINK_ACCOUNT: 'a', EWELINK_PASSWORD: 'b', EWELINK_APP_ID: 'c', EWELINK_APP_SECRET: 'd'};
+test('failover is opt-in and validates lease settings', () => {
+  assert.equal(loadConfig(credentials).failover.enabled, false);
+  assert.equal(loadConfig({...credentials, FAILOVER_ENABLED:'true'}).failover.duration, 30000);
+  for (const settings of [{FAILOVER_RENEWAL_INTERVAL:30000}, {FAILOVER_LEASE_DURATION:0}, {FAILOVER_RETRY_INTERVAL:2147483648}, {FAILOVER_RETRY_INTERVAL:'1.5'}, {FAILOVER_BUCKET:'bad.name'}, {FAILOVER_LEASE_KEY:'*'}]) {
+    assert.throws(() => loadConfig({...credentials, ...settings}));
+  }
+});
 test('environment-only NATS authentication, TLS and multiple servers', () => {
   const config = loadConfig({...credentials, NATS_SERVERS: 'nats://one:4222, nats://two:4222', NATS_TOKEN: 'secret', NATS_TLS_CA: 'pem', SUBJECT_PREFIX: 'home.ewelink'});
   assert.deepEqual(config.natsOptions.servers, ['nats://one:4222', 'nats://two:4222']);
@@ -20,7 +27,7 @@ test('cloud updates preserve raw, scalar, structured and null payloads and escap
   const params = {temperature:22.5, switches:[{switch:'on'}], empty:null, 'a.* >':'on'};
   const messages = deviceMessages({deviceid:'a.b', params}, loadConfig(credentials));
   assert.deepEqual(messages, [
-    ['ewelink.a_b.state.raw', JSON.stringify(params)],
+    ['ewelink.a_b.state.raw', JSON.stringify({deviceid:'a.b', params})],
     ['ewelink.a_b.state.temperature', '22.5'],
     ['ewelink.a_b.state.switches', '[{"switch":"on"}]'],
     ['ewelink.a_b.state.empty', ''],
@@ -38,7 +45,7 @@ test('raw-only publishing suppresses all individual state subjects', () => {
   for (const value of ['only', 'ONLY']) {
     const config = loadConfig({...credentials, SUBJECT_PREFIX:'home.ewelink', PUBLISH_RAW_STATE:value});
     assert.deepEqual(deviceMessages({deviceid:'a.b', params}, config), [
-      ['home.ewelink.a_b.state.raw', JSON.stringify(params)]
+      ['home.ewelink.a_b.state.raw', JSON.stringify({deviceid:'a.b', params})]
     ]);
   }
   assert.throws(() => loadConfig({...credentials, PUBLISH_RAW_STATE:'maybe'}), /PUBLISH_RAW_STATE/);

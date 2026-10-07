@@ -13,7 +13,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY bridge.js config.js ./
+COPY bridge.js config.js lease.js ./
 
 RUN addgroup -S app && adduser -S -G app app
 USER app

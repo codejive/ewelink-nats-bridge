@@ -3,6 +3,7 @@
 const Ewelink = require('ewelink-api-next').default;
 const { connect, credsAuthenticator } = require('@nats-io/transport-node');
 const { loadConfig, deviceMessages } = require('./config');
+const {Lease, openLeaseBucket} = require('./lease');
 let config;
 try { config = loadConfig(); } catch (err) { console.error(err.message); process.exit(1); }
 let websocket;
@@ -11,10 +12,15 @@ let shuttingDown = false;
 let natsError;
 let natsConnected = false;
 let sourceStarting = false;
+let lease;
+let sourceTask;
+let sourceClosed;
+let resolveSourceClosed;
+const ownsSource = () => !config.failover.enabled || Boolean(lease?.owned);
 const bridgeStatusSubject = `${config.subjectPrefix}.bridge.status`;
 
 async function publishDeviceUpdate(action) {
-  if (shuttingDown) return;
+  if (shuttingDown || !ownsSource()) return;
   const messages = deviceMessages(action, config);
   for (const [subject, payload] of messages) natsClient.publish(subject, Buffer.from(payload));
   console.log(`Published ${messages.length} subjects for device ${action.deviceid}`);
@@ -67,7 +73,7 @@ async function loginWithRegionFallback(client) {
     lang: 'en'
   });
 
-  if (response && response.error === 10004 && response.data && response.data.region) {
+  if (!shuttingDown && ownsSource() && response && response.error === 10004 && response.data && response.data.region) {
     region = response.data.region;
     console.log(`eWeLink account redirects to region: ${region}`);
     client.setUrl(region);
@@ -83,6 +89,7 @@ async function loginWithRegionFallback(client) {
 }
 
 async function startBridge() {
+  if (shuttingDown || !ownsSource()) return;
   console.log(`Connecting to eWeLink cloud region: ${config.ewelinkRegion}`);
 
   const webApi = new Ewelink.WebAPI({
@@ -92,7 +99,7 @@ async function startBridge() {
   });
 
   const { response: loginResponse, region: resolvedRegion } = await loginWithRegionFallback(webApi);
-  if (shuttingDown) return;
+  if (shuttingDown || !ownsSource()) return;
   if (!loginResponse || loginResponse.error) {
     const message = loginResponse && loginResponse.msg ? loginResponse.msg : JSON.stringify(loginResponse || {});
     throw new Error(`Failed to authenticate with eWeLink cloud: ${message}`);
@@ -104,6 +111,7 @@ async function startBridge() {
     region: resolvedRegion
   });
 
+  sourceClosed = new Promise(resolve => { resolveSourceClosed = resolve; });
   websocket = await wsClient.Connect.create(
     {
       region: resolvedRegion,
@@ -116,7 +124,8 @@ async function startBridge() {
     },
     () => {
       console.error('eWeLink websocket closed');
-      if (!shuttingDown && config.exitOnWsClose) {
+      resolveSourceClosed();
+      if (!shuttingDown && (config.failover.enabled || config.exitOnWsClose)) {
         shutdown('WEBSOCKET_CLOSED', 1);
       }
     },
@@ -139,19 +148,30 @@ async function startBridge() {
     }
   );
 
-  if (shuttingDown) { websocket.close(); return; }
+  if (shuttingDown || !ownsSource()) { websocket.close(); return; }
   console.log('Bridge is running. Waiting for device updates...');
 }
 
 async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`Received ${signal}, shutting down...`);
+  console.log(`${lease ? `[${lease.id}] ` : ''}Received ${signal}, shutting down...`);
   const timeout = setTimeout(() => process.exit(exitCode || 1), 5000);
   try {
+    const stoppingRenewals = lease?.stopRenewals();
     if (websocket) websocket.close();
+    await stoppingRenewals;
+    // A delayed dispatch/login must finish before release. The shutdown limit
+    // exits without release if it cannot finish, leaving server TTL to recover.
+    if (sourceTask) await sourceTask.catch(() => {});
+    if (websocket) websocket.close();
+    if (config.failover.enabled && websocket) await sourceClosed;
     if (natsClient && !natsClient.isClosed()) {
-      natsClient.publish(bridgeStatusSubject, Buffer.from('offline'));
+      if (!config.failover.enabled || lease?.revision) {
+        natsClient.publish(bridgeStatusSubject, Buffer.from('offline'));
+        await natsClient.flush();
+      }
+      if (lease) await lease.release().catch(err => console.error(`[${lease.id}] Safe release failed; leaving lease to expire:`, err.message));
       await natsClient.drain();
     }
   } catch (err) {
@@ -168,16 +188,23 @@ async function monitorNats() {
     if (status.type === 'error') {
       natsError = status.error || new Error('Unknown NATS server error');
       console.error('NATS error:', natsError);
-      if (sourceStarting && !shuttingDown) shutdown('NATS_ERROR', 1);
+      if ((sourceStarting || config.failover.enabled) && !shuttingDown) {
+        if (lease) lease.invalidate();
+        shutdown('NATS_ERROR', 1);
+      }
       continue;
     }
     if (status.type === 'reconnect' && !shuttingDown) {
       natsConnected = true;
       console.log('Reconnected to NATS');
-      natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
+      if (ownsSource()) natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
     } else if (['disconnect', 'reconnecting'].includes(status.type)) {
       natsConnected = false;
       console.log(`NATS ${status.type}${status.server ? `: ${status.server}` : ''}`);
+      if (config.failover.enabled && !shuttingDown) {
+        if (lease) lease.invalidate();
+        shutdown('NATS_DISCONNECTED', 1);
+      }
     }
   }
 }
@@ -191,10 +218,25 @@ async function main() {
   natsClient.closed().then(err => {
     if (!shuttingDown) {
       console.error('NATS connection closed:', err ? err.message : 'connection ended');
+      if (lease) lease.invalidate();
       shutdown('NATS_CLOSED', 1);
     }
   });
   monitorNats().catch(err => { console.error('NATS status error:', err.message); shutdown('NATS_STATUS_ERROR', 1); });
+  if (config.failover.enabled) {
+    const kv = await openLeaseBucket(natsClient, config.failover);
+    if (shuttingDown) return;
+    lease = new Lease(kv, config.failover, err => {
+      console.error(`[${lease.id}] active -> standby: lease renewal failed or uncertain:`, err.message);
+      shutdown('LEASE_LOST', 1);
+    });
+    console.log(`[${lease.id}] standby; waiting for ${config.failover.bucket}/${config.failover.key}`);
+    while (!shuttingDown && !await lease.acquire()) {
+      await new Promise(resolve => setTimeout(resolve, config.failover.retry * (0.8 + Math.random() * 0.4)));
+    }
+    if (shuttingDown) return;
+    console.log(`[${lease.id}] standby -> active; revision ${lease.revision}`);
+  }
   natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
   await natsClient.flush();
   // A PONG acknowledges the flush, but publish permission errors arrive via
@@ -205,7 +247,8 @@ async function main() {
   if (!natsConnected || natsClient.isClosed()) throw new Error('NATS disconnected before source startup');
   console.log('Connected to NATS; status publish confirmed');
   sourceStarting = true;
-  await startBridge();
+  sourceTask = startBridge();
+  await sourceTask;
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

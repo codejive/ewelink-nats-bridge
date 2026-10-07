@@ -1,1 +1,19 @@
-{"name":"ewelink-nats-bridge","version":"0.1.1","description":"Bridge eWeLink cloud updates into NATS","main":"bridge.js","type":"commonjs","scripts":{"start":"node bridge.js","test":"node --test"},"engines":{"node":">=22"},"dependencies":{"ewelink-api-next":"^1.0.4","@nats-io/transport-node":"^3.0.0"}}
+{
+    "name": "ewelink-nats-bridge",
+    "version": "0.1.1",
+    "description": "Bridge eWeLink cloud updates into NATS",
+    "main": "bridge.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node bridge.js",
+        "test": "node --test"
+    },
+    "engines": {
+        "node": ">=22"
+    },
+    "dependencies": {
+        "@nats-io/kv": "^3.4.0",
+        "@nats-io/transport-node": "^3.0.0",
+        "ewelink-api-next": "^1.0.4"
+    }
+}

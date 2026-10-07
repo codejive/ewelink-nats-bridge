@@ -22,7 +22,7 @@ test('bridge logs in with region redirect, publishes cloud update and drains on 
         assert.equal(websocketClosed, true);
         assert.deepEqual(published, [
           ['ewelink.bridge.status','online'],
-          ['ewelink.123.state.raw','{"switch":"on"}'],
+          ['ewelink.123.state.raw','{"action":"update","deviceid":"123","params":{"switch":"on"}}'],
           ['ewelink.123.state.switch','on'],
           ['ewelink.bridge.status','offline']
         ]);
