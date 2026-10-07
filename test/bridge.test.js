@@ -11,27 +11,23 @@ test('bridge logs in with region redirect, publishes cloud update and drains on 
     const published = [];
     let loginCount = 0;
     let websocketClosed = false;
-    let flushed = false;
     const nc = {
       publish(subject, data) { published.push([subject, data.toString()]); },
-      async flush() { await new Promise(resolve => setTimeout(resolve, 20)); flushed = true; },
       closed() { return new Promise(() => {}); },
       async *status() {},
       isClosed() { return false; },
       async drain() {
         assert.equal(websocketClosed, true);
         assert.deepEqual(published, [
-          ['ewelink.bridge.status','online'],
           ['ewelink.123.state.raw','{"action":"update","deviceid":"123","params":{"switch":"on"}}'],
-          ['ewelink.123.state.switch','on'],
-          ['ewelink.bridge.status','offline']
+          ['ewelink.123.state.switch','on']
         ]);
         console.log('DRAIN_VERIFIED');
       }
     };
     class WebAPI {
       constructor() {
-        assert.equal(flushed, true, 'source must wait for NATS flush');
+        assert.deepEqual(published, [], 'startup must not publish messages');
         this.at = 'access'; this.userApiKey = 'api';
         this.user = {login: async () => ++loginCount === 1 ? {error:10004,data:{region:'eu'}} : {error:0}};
       }
@@ -66,23 +62,15 @@ test('bridge logs in with region redirect, publishes cloud update and drains on 
   assert.match(result.stdout, /DRAIN_VERIFIED/);
 });
 
-test('NATS publish permission error blocks source startup even when flush succeeds', () => {
+test('NATS connection error blocks source startup', () => {
   const script = `
     const Module = require('node:module');
     const original = Module._load;
-    let emitError;
-    const errorReady = new Promise(resolve => { emitError = resolve; });
     const nc = {
       publish() {},
-      async flush() {
-        emitError();
-        await new Promise(resolve => setImmediate(resolve));
-      },
       closed() { return new Promise(() => {}); },
       async *status() {
-        await errorReady;
-        const error = new Error('Permissions Violation for Publish to "ewelink.bridge.status"');
-        error.name = 'PermissionViolationError';
+        const error = new Error('NATS connection failed');
         yield {type:'error', error};
       },
       isClosed() { return false; },
@@ -103,7 +91,6 @@ test('NATS publish permission error blocks source startup even when flush succee
     env:{...process.env, EWELINK_ACCOUNT:'test', EWELINK_PASSWORD:'test', EWELINK_APP_ID:'test', EWELINK_APP_SECRET:'test', NATS_TOKEN:'', NATS_USER:'', NATS_PASS:'', NATS_CREDS:''}
   });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /NATS error:.*PermissionViolationError/);
-  assert.match(result.stderr, /ewelink\.bridge\.status/);
+  assert.match(result.stderr, /NATS error:.*NATS connection failed/);
   assert.doesNotMatch(result.stdout, /SOURCE_STARTED|Connecting to eWeLink|Connected to NATS/);
 });

@@ -21,11 +21,11 @@ for (const scenario of ['standby', 'active', 'lost-login', 'lost-dispatch', 'dis
         async update() { throw new Error('uncertain renewal'); },
         async delete(key, options) {
           assert.equal(closed, true); assert.equal(options.previousSeq, 1);
-          assert.equal(published.at(-1), 'offline'); released = true;
+          released = true;
         }
       };
       const nc = {
-        publish(subject, data) { published.push(data.toString()); }, async flush() {},
+        publish(subject, data) { published.push(data.toString()); },
         closed() { return new Promise(() => {}); },
         async *status() {
           if (scenario === 'disconnect') { await new Promise(r => setTimeout(r, 25)); yield {type:'disconnect'}; }
@@ -33,8 +33,8 @@ for (const scenario of ['standby', 'active', 'lost-login', 'lost-dispatch', 'dis
         isClosed() { return false; }, async close() {},
         async drain() {
           if (scenario === 'standby') { assert.equal(login, false); assert.deepEqual(published, []); assert.equal(released, false); }
-          else if (scenario.startsWith('lost') || scenario === 'disconnect') { assert.equal(released, false); assert.deepEqual(published, ['online']); }
-          else { assert.equal(released, true); assert.deepEqual(published, ['online','offline']); }
+          else if (scenario.startsWith('lost') || scenario === 'disconnect') { assert.equal(released, false); assert.deepEqual(published, []); }
+          else { assert.equal(released, true); assert.deepEqual(published, []); }
           console.log('VERIFIED');
         }
       };

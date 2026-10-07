@@ -6,7 +6,7 @@ Looking for the MQTT version of this bridge? Check out [ewelink-mqtt-bridge](htt
 
 ## How It Works
 
-1. Connect to NATS and flush the bridge status publication. Server errors (including publish permission violations) block source startup.
+1. Connect to NATS.
 2. Authenticate to eWeLink cloud using app credentials and account credentials, then open a persistent websocket to receive live device update events.
 3. Publish each update to NATS subjects using a predictable subject structure.
 
@@ -14,11 +14,10 @@ Looking for the MQTT version of this bridge? Check out [ewelink-mqtt-bridge](htt
 
 - `ewelink.<deviceId>.state.<key>`: individual value (objects/arrays as JSON, scalars as text, null as empty text).
 - `ewelink.<deviceId>.state.raw`: complete update event as JSON (when `PUBLISH_RAW_STATE` is set to `true` or `only`).
-- `ewelink.bridge.status`: `online` on connection/reconnection, `offline` on graceful shutdown.
 
 For example, `{"temperature":22.5,"humidity":48}` publishes a raw JSON message and two individual messages, `22.5` and `48`. Dots, whitespace and NATS wildcards in device IDs or parameter names become underscores. Subscribe to `ewelink.>` for all messages.
 
-Core NATS delivers messages to current subscribers without retention or MQTT QoS/last-will semantics. Late subscribers do not receive previous state or status. An abrupt crash or disconnect cannot publish `offline`. Updates buffered during reconnect can be lost if the process exits; this bridge does not provide durable delivery. Optional failover uses an externally provisioned JetStream KV bucket only for leadership. See the [NATS client documentation](https://github.com/nats-io/nats.js/tree/main/core).
+Core NATS delivers messages to current subscribers without retention or MQTT QoS/last-will semantics. Late subscribers do not receive previous state. Updates buffered during reconnect can be lost if the process exits; this bridge does not provide durable delivery. Optional failover uses an externally provisioned JetStream KV bucket only for leadership. See the [NATS client documentation](https://github.com/nats-io/nats.js/tree/main/core).
 
 ## Environment variables
 
@@ -135,9 +134,9 @@ The bucket must have history 1 and a TTL exactly matching `FAILOVER_LEASE_DURATI
 
 On both VPSes, use the same eWeLink credentials, external `NATS_SERVERS`, subject prefix, bucket, key and timing settings; set `FAILOVER_ENABLED=true`. Run both containers with `--restart unless-stopped` (or the provided Compose restart policy). Both applications subscribe to the same external Core NATS subjects. Each bridge process generates a unique UUID and logs standby/active transitions with that ID. A recovered bridge remains on standby while another owns the key.
 
-Runtime credentials need the existing device/status publish permissions and JetStream account/stream information and KV operations. For the default bucket, allow requests to `$JS.API.INFO`, `$JS.API.STREAM.INFO.KV_ewelink_leases`, and `$JS.API.STREAM.MSG.GET.KV_ewelink_leases`; allow publish to `$KV.ewelink_leases.bridge` (or all configured keys) and subscribe to reply inboxes `_INBOX.>`. KV create may read existing delete markers through `$JS.API.DIRECT.GET.KV_ewelink_leases.>`; permit those requests as well. Adapt API prefixes if using a JetStream domain. No stream creation, consumer creation, or unconditional stream purge permission is needed. Have your NATS administrator apply permissions; this implementation does not change external configuration.
+Runtime credentials need the existing device publish permissions and JetStream account/stream information and KV operations. For the default bucket, allow requests to `$JS.API.INFO`, `$JS.API.STREAM.INFO.KV_ewelink_leases`, and `$JS.API.STREAM.MSG.GET.KV_ewelink_leases`; allow publish to `$KV.ewelink_leases.bridge` (or all configured keys) and subscribe to reply inboxes `_INBOX.>`. KV create may read existing delete markers through `$JS.API.DIRECT.GET.KV_ewelink_leases.>`; permit those requests as well. Adapt API prefixes if using a JetStream domain. No stream creation, consumer creation, or unconditional stream purge permission is needed. Have your NATS administrator apply permissions; this implementation does not change external configuration.
 
-Leadership uses atomic KV create and revision-checked updates/deletes. NATS server time controls expiry; VPS clocks are never used to decide ownership. Renewals begin immediately after acquisition, including while login is pending. Only the lease owner publishes shared online/offline status; standby shutdown is silent. Device subjects and payloads retain the current behavior.
+Leadership uses atomic KV create and revision-checked updates/deletes. NATS server time controls expiry; VPS clocks are never used to decide ownership. Renewals begin immediately after acquisition, including while login is pending. Device subjects and payloads retain the current behavior.
 
 Renewal failure (including an ambiguous timeout), NATS disconnect, or source closure stops the process. Failover mode always exits on source closure, overriding `EXIT_ON_WEBSOCKET_CLOSE=false`. Container restart performs a fresh acquisition before any authentication. The installed eWeLink dependency has no automatic source reconnect. During graceful shutdown, renewals stop, pending source creation completes, and WebSocket closure is confirmed before revision-checked release. If shutdown cannot finish within five seconds, or safe release fails, the lease expires on the server instead.
 
@@ -146,12 +145,11 @@ After a crash or unconfirmed release, takeover normally takes the remaining TTL 
 To run the integration test against a temporary local server, set `NATS_TEST_SERVER` to the absolute path of a `nats-server` executable and run `npm test`. The test launches JetStream on a random local port, validates atomic acquisition, renewal revisions, server TTL takeover and stale-release protection, then removes its temporary storage. Without that variable, only the real-server test is skipped.
 
 - With failover disabled, the bridge reconnects automatically to NATS. With failover enabled, a disconnect stops the process for a fresh lease acquisition on restart.
-- NATS server errors include their full details and stop the bridge with failure. Allow publishing to both `ewelink.bridge.status` and device state subjects (or the corresponding custom prefix). The startup status check does not verify permissions for every device subject or guarantee durable delivery.
+- NATS server errors are logged with their full details. Allow publishing to device state subjects (or the corresponding custom prefix). Publish permissions are checked by the server when device updates are sent.
 - If websocket connectivity drops, the bridge can exit and rely on container restart policy.
 - Initial connection/login failures and exhausted NATS reconnect attempts exit with failure.
 - SIGINT/SIGTERM closes the cloud websocket and drains NATS, with a five-second shutdown limit.
 - With failover disabled, disabling `EXIT_ON_WEBSOCKET_CLOSE` leaves the process running after cloud closure without automatically reconnecting the cloud websocket.
-- The bridge manages `ewelink.bridge.status` itself: `online` after NATS connects, `offline` on shutdown. In failover mode, only the active owner publishes status.
 
 ## License
 

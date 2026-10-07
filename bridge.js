@@ -17,7 +17,6 @@ let sourceTask;
 let sourceClosed;
 let resolveSourceClosed;
 const ownsSource = () => !config.failover.enabled || Boolean(lease?.owned);
-const bridgeStatusSubject = `${config.subjectPrefix}.bridge.status`;
 
 async function publishDeviceUpdate(action) {
   if (shuttingDown || !ownsSource()) return;
@@ -167,10 +166,6 @@ async function shutdown(signal, exitCode = 0) {
     if (websocket) websocket.close();
     if (config.failover.enabled && websocket) await sourceClosed;
     if (natsClient && !natsClient.isClosed()) {
-      if (!config.failover.enabled || lease?.revision) {
-        natsClient.publish(bridgeStatusSubject, Buffer.from('offline'));
-        await natsClient.flush();
-      }
       if (lease) await lease.release().catch(err => console.error(`[${lease.id}] Safe release failed; leaving lease to expire:`, err.message));
       await natsClient.drain();
     }
@@ -197,7 +192,6 @@ async function monitorNats() {
     if (status.type === 'reconnect' && !shuttingDown) {
       natsConnected = true;
       console.log('Reconnected to NATS');
-      if (ownsSource()) natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
     } else if (['disconnect', 'reconnecting'].includes(status.type)) {
       natsConnected = false;
       console.log(`NATS ${status.type}${status.server ? `: ${status.server}` : ''}`);
@@ -237,15 +231,12 @@ async function main() {
     if (shuttingDown) return;
     console.log(`[${lease.id}] standby -> active; revision ${lease.revision}`);
   }
-  natsClient.publish(bridgeStatusSubject, Buffer.from('online'));
-  await natsClient.flush();
-  // A PONG acknowledges the flush, but publish permission errors arrive via
-  // status() and do not reject flush(). Let that iterator process them first.
+  // Let queued connection events be handled before starting the source.
   await new Promise(resolve => setImmediate(resolve));
   if (natsError) throw natsError;
   if (shuttingDown) return;
   if (!natsConnected || natsClient.isClosed()) throw new Error('NATS disconnected before source startup');
-  console.log('Connected to NATS; status publish confirmed');
+  console.log('Connected to NATS');
   sourceStarting = true;
   sourceTask = startBridge();
   await sourceTask;
