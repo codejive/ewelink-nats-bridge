@@ -17,6 +17,9 @@ let sourceTask;
 let sourceClosed;
 let resolveSourceClosed;
 const ownsSource = () => !config.failover.enabled || Boolean(lease?.owned);
+function debug(message) {
+  if (config.verbose) console.log(`${lease ? `[${lease.id}] ` : ''}${message}`);
+}
 
 async function publishDeviceUpdate(action) {
   if (shuttingDown || !ownsSource()) return;
@@ -98,7 +101,7 @@ async function startBridge() {
   });
 
   const { response: loginResponse, region: resolvedRegion } = await loginWithRegionFallback(webApi);
-  if (shuttingDown || !ownsSource()) return;
+  if (shuttingDown || !ownsSource()) { debug('Discarding delayed login result: shutting down or ownership invalid'); return; }
   if (!loginResponse || loginResponse.error) {
     const message = loginResponse && loginResponse.msg ? loginResponse.msg : JSON.stringify(loginResponse || {});
     throw new Error(`Failed to authenticate with eWeLink cloud: ${message}`);
@@ -111,6 +114,7 @@ async function startBridge() {
   });
 
   sourceClosed = new Promise(resolve => { resolveSourceClosed = resolve; });
+  console.log('eWeLink authentication succeeded; creating websocket connection');
   websocket = await wsClient.Connect.create(
     {
       region: resolvedRegion,
@@ -147,7 +151,10 @@ async function startBridge() {
     }
   );
 
-  if (shuttingDown || !ownsSource()) { websocket.close(); return; }
+  if (shuttingDown || !ownsSource()) {
+    debug('Closing delayed websocket result: shutting down or ownership invalid');
+    websocket.close(); return;
+  }
   console.log('Bridge is running. Waiting for device updates...');
 }
 
@@ -155,19 +162,31 @@ async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`${lease ? `[${lease.id}] ` : ''}Received ${signal}, shutting down...`);
-  const timeout = setTimeout(() => process.exit(exitCode || 1), 5000);
+  const timeout = setTimeout(() => {
+    console.error(`${lease ? `[${lease.id}] ` : ''}Shutdown timed out; any unreleased lease will expire`);
+    process.exit(exitCode || 1);
+  }, 5000);
   try {
     const stoppingRenewals = lease?.stopRenewals();
+    debug('Closing source and waiting for pending startup and renewal operations');
     if (websocket) websocket.close();
     await stoppingRenewals;
     // A delayed dispatch/login must finish before release. The shutdown limit
     // exits without release if it cannot finish, leaving server TTL to recover.
     if (sourceTask) await sourceTask.catch(() => {});
     if (websocket) websocket.close();
-    if (config.failover.enabled && websocket) await sourceClosed;
+    if (config.failover.enabled && websocket) {
+      debug('Waiting for confirmed eWeLink websocket closure before lease release');
+      await sourceClosed;
+      debug('eWeLink websocket closure confirmed');
+    }
     if (natsClient && !natsClient.isClosed()) {
       if (lease) await lease.release().catch(err => console.error(`[${lease.id}] Safe release failed; leaving lease to expire:`, err.message));
+      debug('Draining NATS connection');
       await natsClient.drain();
+      console.log('NATS connection drained; shutdown complete');
+    } else if (lease) {
+      console.log(`[${lease.id}] Lease release skipped: NATS unavailable; leaving lease to expire`);
     }
   } catch (err) {
     console.error('Failed to shut down cleanly:', err.message || err);
@@ -218,15 +237,19 @@ async function main() {
   });
   monitorNats().catch(err => { console.error('NATS status error:', err.message); shutdown('NATS_STATUS_ERROR', 1); });
   if (config.failover.enabled) {
+    debug(`Opening failover bucket ${config.failover.bucket}`);
     const kv = await openLeaseBucket(natsClient, config.failover);
+    debug(`Failover bucket validated: TTL ${config.failover.duration}ms, history 1`);
     if (shuttingDown) return;
     lease = new Lease(kv, config.failover, err => {
       console.error(`[${lease.id}] active -> standby: lease renewal failed or uncertain:`, err.message);
       shutdown('LEASE_LOST', 1);
-    });
+    }, undefined, (message, verboseOnly) => { if (!verboseOnly || config.verbose) console.log(message); });
     console.log(`[${lease.id}] standby; waiting for ${config.failover.bucket}/${config.failover.key}`);
     while (!shuttingDown && !await lease.acquire()) {
-      await new Promise(resolve => setTimeout(resolve, config.failover.retry * (0.8 + Math.random() * 0.4)));
+      const delay = config.failover.retry * (0.8 + Math.random() * 0.4);
+      debug(`Standby acquisition retry in ${Math.round(delay)}ms`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
     if (shuttingDown) return;
     console.log(`[${lease.id}] standby -> active; revision ${lease.revision}`);

@@ -44,7 +44,7 @@ Core NATS delivers messages to current subscribers without retention or MQTT QoS
 | `NATS_MAX_RECONNECT_ATTEMPTS` | `-1` | Reconnect attempts per server; `-1` unlimited, `0` disables retries. |
 | `SUBJECT_PREFIX` | `ewelink` | Nonempty dot-separated subject prefix without wildcards/whitespace. |
 | `PUBLISH_RAW_STATE` | `true` | `true`: publish raw JSON and individual state keys; `false`: individual keys only; `only`: raw JSON only. |
-| `VERBOSE` | `false` | Log all eWeLink websocket packets. |
+| `VERBOSE` | `false` | Log all eWeLink websocket packets and detailed failover acquisition/retry, renewal revision, bucket validation and shutdown progress. |
 | `EXIT_ON_WEBSOCKET_CLOSE` | `true` | Exit with failure on cloud websocket closure, for container restart. |
 
 Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`. TLS certificates and credentials accept actual multiline contents, so no mounted configuration files are needed. Choose a single authentication method. Obtain eWeLink app credentials from the [developer platform](https://dev.ewelink.io/).
@@ -121,7 +121,7 @@ Provision once using the NATS CLI with administrator credentials (these commands
 nats --server "$NATS_SERVERS" kv add ewelink_leases --history=1 --ttl=30s --storage=file --replicas=1
 ```
 
-The bucket must have history 1 and a TTL exactly matching `FAILOVER_LEASE_DURATION`. Its backing stream must use only `$KV.ewelink_leases.>`, unlimited total messages/bytes, and no mirror, sources, per-message TTL or automatic delete markers. Use a separate bucket per account when different lease durations are needed. Bucket permission, configuration and JetStream availability failures stop startup with a diagnostic; contention simply remains on standby.
+The bucket must have history 1 and a TTL exactly matching `FAILOVER_LEASE_DURATION`. Its backing stream must use only `$KV.ewelink_leases.>`, unlimited total messages, and either unlimited bytes (`max_bytes=-1`) or a byte limit of at least 1024 (1 KiB). It must have no mirror, sources, per-message TTL or automatic delete markers. A 1 KiB limit is sufficient for a single UUID lease with message overhead; allow more capacity when sharing the bucket across multiple account keys. Use a separate bucket per account when different lease durations are needed. Bucket permission, configuration and JetStream availability failures stop startup with a diagnostic; contention simply remains on standby.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -137,6 +137,8 @@ On both VPSes, use the same eWeLink credentials, external `NATS_SERVERS`, subjec
 Runtime credentials need the existing device publish permissions and JetStream account/stream information and KV operations. For the default bucket, allow requests to `$JS.API.INFO`, `$JS.API.STREAM.INFO.KV_ewelink_leases`, and `$JS.API.STREAM.MSG.GET.KV_ewelink_leases`; allow publish to `$KV.ewelink_leases.bridge` (or all configured keys) and subscribe to reply inboxes `_INBOX.>`. KV create may read existing delete markers through `$JS.API.DIRECT.GET.KV_ewelink_leases.>`; permit those requests as well. Adapt API prefixes if using a JetStream domain. No stream creation, consumer creation, or unconditional stream purge permission is needed. Have your NATS administrator apply permissions; this implementation does not change external configuration.
 
 Leadership uses atomic KV create and revision-checked updates/deletes. NATS server time controls expiry; VPS clocks are never used to decide ownership. Renewals begin immediately after acquisition, including while login is pending. Device subjects and payloads retain the current behavior.
+
+Lease logs include the process UUID and bucket/key. Routine standby contention, successful renewals, ownership invalidation, renewal stopping and release attempts/confirmation are logged only with `VERBOSE=true`. Acquisition, skipped release and discarded delayed lease results remain visible with verbose logging disabled, along with failures and shutdown timeouts. A confirmed release log means the revision-checked KV delete was acknowledged; skipped or failed release leaves any remaining lease to server-managed expiry.
 
 Renewal failure (including an ambiguous timeout), NATS disconnect, or source closure stops the process. Failover mode always exits on source closure, overriding `EXIT_ON_WEBSOCKET_CLOSE=false`. Container restart performs a fresh acquisition before any authentication. The installed eWeLink dependency has no automatic source reconnect. During graceful shutdown, renewals stop, pending source creation completes, and WebSocket closure is confirmed before revision-checked release. If shutdown cannot finish within five seconds, or safe release fails, the lease expires on the server instead.
 

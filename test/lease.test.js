@@ -1,8 +1,37 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {Lease, openLeaseBucket} = require('../lease');
+const {Lease, openLeaseBucket, validateLeaseBucket} = require('../lease');
 const config = {key:'bridge', renewal:60000, duration:30000};
+test('bucket diagnostics identify mismatches with expected and actual values', () => {
+  const settings = {...config, bucket:'leases'};
+  const status = {ttl:30000, history:1, streamInfo:{config:{subjects:['$KV.leases.>'], max_msgs:-1, max_bytes:-1}}};
+  assert.doesNotThrow(() => validateLeaseBucket(status, settings));
+  status.ttl = 60000;
+  status.streamInfo.config.max_bytes = 512;
+  status.streamInfo.config.allow_msg_ttl = true;
+  assert.throws(() => validateLeaseBucket(status, settings), err => {
+    assert.match(err.message, /TTL .*expected 30000, actual 60000/);
+    assert.match(err.message, /max_bytes: expected -1 \(unlimited\) or at least 1024 bytes, actual 512/);
+    assert.match(err.message, /allow_msg_ttl: expected false, actual true/);
+    assert.doesNotMatch(err.message, /history|subjects/);
+    return true;
+  });
+  delete status.streamInfo.config.max_msgs;
+  assert.throws(() => validateLeaseBucket(status, settings), /max_msgs: expected -1, actual missing/);
+});
+test('bucket accepts unlimited or sufficient finite byte capacity', () => {
+  const settings = {...config, bucket:'leases'};
+  const status = {ttl:30000, history:1, streamInfo:{config:{subjects:['$KV.leases.>'], max_msgs:-1}}};
+  for (const capacity of [-1, 1024, 1048576]) {
+    status.streamInfo.config.max_bytes = capacity;
+    assert.doesNotThrow(() => validateLeaseBucket(status, settings));
+  }
+  for (const capacity of [undefined, -2, 0, 1023, 1024.5]) {
+    status.streamInfo.config.max_bytes = capacity;
+    assert.throws(() => validateLeaseBucket(status, settings), /max_bytes: expected -1 \(unlimited\) or at least 1024 bytes/);
+  }
+});
 function store() {
   let entry, seq = 0;
   const conflict = () => Object.assign(new Error('wrong revision'), {code:10071});
@@ -77,7 +106,7 @@ test('real NATS atomic acquisition, bucket validation and server TTL', {skip: !p
     await new Kvm(nc).create('leases', {ttl:1000, history:1});
     const settings = {...config, bucket:'leases', duration:1000};
     const kv = await openLeaseBucket(nc, settings);
-    await assert.rejects(openLeaseBucket(nc, {...settings, duration:30000}), /matching TTL/);
+    await assert.rejects(openLeaseBucket(nc, {...settings, duration:30000}), /TTL .*expected 30000, actual 1000/);
     const a = new Lease(kv, settings, () => {}); const b = new Lease(kv, settings, () => {});
     try {
       const results = await Promise.all([a.acquire(), b.acquire()]); assert.equal(results.filter(Boolean).length, 1);
